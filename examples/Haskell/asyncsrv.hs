@@ -1,24 +1,25 @@
-{-# LANGUAGE OverloadedStrings #-}
 module Main where
 
 import System.ZMQ3.Monadic
 import ZHelpers (setRandomIdentity)
 import Control.Concurrent (threadDelay)
 import Data.ByteString.Char8 (pack, unpack)
-import Control.Monad (forever, forM_, when, replicateM_)
-import System.Random (newStdGen, randomR, StdGen)
+import Control.Monad (forever, forM_, replicateM_)
+import System.Random (randomRIO)
 
 clientTask :: String -> ZMQ z ()
 clientTask ident = do
     client <- socket Dealer
     setRandomIdentity client
     connect client "tcp://localhost:5570"
-    forM_ [1..] $ \i -> do -- forever
+    forM_ [1..] $ \i -> do -- (long enough) forever
         -- tick one per second, pulling in arriving messages
-        forM_ [0..100] $ \_ -> do
-            [evts] <- poll 10 [Sock client [In] Nothing] -- timeout of 10 ms
-            when (In `elem` evts) $
-                receive client >>= \msg -> liftIO $ putStrLn $ unwords ["Client", ident, "has received back from worker its msg \"", (unpack msg), "\""]
+        forM_ [0..100] $ \_ -> 
+            poll 10 -- timeout of 10 ms
+                [Sock client [In] -- wait for incoming event 
+                $ Just $ -- if it happens do
+                    \_ -> receive client >>= \msg -> liftIO $ putStrLn $ unwords ["Client", ident, "has received back from worker its msg \"", (unpack msg), "\""]] 
+              
         send client [] (pack $ unwords ["Client", ident, "sends request", show i])
 
             
@@ -39,17 +40,18 @@ serverWorker = do
     worker <- socket Dealer
     connect worker "inproc://backend"
     liftIO $ putStrLn "Worker Started"        
-    forever $ do
-        _id <- receive worker
-        msg <- receive worker
-        gen <- liftIO $ newStdGen
-        let (val, gen') = randomR (0,4) gen :: (Int, StdGen)
-            (r, _)      = randomR (1, 1000) gen' :: (Int, StdGen)
-        -- send back the received msg to client 0 to 4 times max
-        forM_ [0..val] $ \_ -> do
-            liftIO $ threadDelay $ r * 1000
-            send worker [SendMore] _id
-            send worker [] msg
+    forever $ -- receive both ident and msg and send back the msg to the ident client.
+        receive worker >>= \ident -> receive worker >>= \msg -> sendback worker msg ident
+
+    where
+         -- send back to client 0 to 4 times max
+        sendback worker msg ident  = do
+            resentNb <- liftIO $ randomRIO (0, 4)
+            timeoutMsec <- liftIO $ randomRIO (1, 1000) 
+            forM_ [0::Int ..resentNb] $ \_ -> do
+                liftIO $ threadDelay $ timeoutMsec * 1000
+                send worker [SendMore] ident
+                send worker [] msg
 
 main :: IO ()
 main = 
@@ -59,4 +61,4 @@ main =
         async $ clientTask "C"
         async serverTask
         
-        liftIO $ threadDelay $ 10 * 1000 * 1000
+        liftIO $ threadDelay $ 5 * 1000 * 1000
